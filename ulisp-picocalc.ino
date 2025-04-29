@@ -323,6 +323,213 @@ volatile flags_t Flags = 1<<PRINTREADABLY; // Set by default
 object *tee;
 void pfstring (const char *s, pfun_t pfun);
 
+
+// Screen structure for text based interface that supports
+// hardware vertical scrolling
+struct screen {
+  // Total number of character lines and colunms on the screen
+  uint8_t lines;
+  uint8_t columns;
+
+  // Distance between lines in pixels
+  uint16_t line_dist;
+
+  // Font for TFT_eSPI
+  int font_id;
+
+  // Font dimentions in pixels
+  int16_t char_height;
+  int16_t char_width;
+
+  // Colors
+  uint32_t text_color;
+  uint32_t bg_color;
+
+  // Current position (column, lines) from the top left corner
+  uint8_t x;
+  uint8_t y;
+
+  // The number of the top pixelline. It is used for hardware
+  // vertical scrolling.
+  uint16_t y_start;
+
+  // Number of scrolls
+  uint16_t scrolls;
+
+  // Hardware scrolling parameters
+  uint16_t scroll_area; // Number of pixellines
+  uint16_t bfa;         // Bottom fixed area in pixellines
+};
+
+struct screen *init_screen() {
+  struct screen *s = (screen *)malloc(sizeof(screen));
+  memset(s, 0, sizeof(screen));
+
+  s->char_height = 14;
+  s->char_width = 8;
+  s->line_dist = 0;
+  s->font_id = 1;
+  
+  s->text_color = TFT_GREEN;
+  s->bg_color = TFT_BLACK;
+
+  s->lines = SCREEN_HEIGHT / (s->char_height + s->line_dist);
+  s->columns = SCREEN_WIDTH / s->char_width;
+
+  // Init display
+  tft = TFT_eSPI(SCREEN_WIDTH, SCREEN_HEIGHT);
+  tft.init();
+  tft.setRotation(0);
+  tft.invertDisplay(1);
+  tft.setTextWrap(false, false);     // Disable text wrapping
+
+  tft.setFreeFont(GOHU_FONT);
+
+  // Configure vertical scrolling
+  s->scroll_area = s->lines * (s->char_height + s->line_dist);
+  s->bfa = SCREEN_ILI9488_HEIGHT - s->scroll_area;
+  tft.writecommand(VSCRDEF);         // Vertical scroll
+  tft.writedata(0);                  // Top Fixed Area line count
+  tft.writedata(0);
+  tft.writedata((s->scroll_area)>>8);    // Vertical Scrolling Area line count
+  tft.writedata((s->scroll_area) & 0xFF);
+  tft.writedata((s->bfa)>>8);                  // Bottom Fixed Area line count
+  tft.writedata((s->bfa) & 0xFF);
+
+  tft.fillScreen(s->bg_color);
+  return s;
+}
+
+void reset(struct screen *s) {
+  s->x = 0;
+  s->y = 0;
+  s->y_start = 0;
+  tft.fillScreen(s->bg_color);
+  tft.writecommand(VSCRSADD); // Vertical scrolling pointer to 0;
+  tft.writedata(0);
+  tft.writedata(0);
+}
+
+int set_position(struct screen *s, int x, int y) {
+  if (x < 0 || x >= s->columns) return -1;
+  if (y < 0 || y >= s->lines) return -1;
+
+  s->x = x;
+  s->y = y;
+  return 0;
+}
+
+void set_colors(struct screen *s, uint32_t text, uint32_t bg) {
+  s->text_color = text;
+  s->bg_color = bg;
+}
+
+void scroll_up(screen *s) {
+  // Clear top line
+  tft.fillRect(0, s->y_start, SCREEN_WIDTH, s->char_height + s->line_dist, s->bg_color);
+  
+  s->y_start = s->y_start + s->char_height + s->line_dist;
+
+  // Wrapping around the scroll
+  // Will be more complicated with non zero TFA and BFA
+  if (s->y_start >= s->scroll_area) s->y_start = s->y_start - s->scroll_area;
+  //if (s->y_start >= s->scroll_area) s->y_start = 0;
+
+  tft.writecommand(VSCRSADD); // Vertical scrolling pointer
+  tft.writedata((s->y_start)>>8);
+  tft.writedata((s->y_start) & 0xFF);
+}
+
+// Move cursor to the prev line, 
+// TODO: support scroll down
+int move_prev_line(struct screen *s, int allow_scroll) {
+  if (s->y > 0) { //
+    s->y--;
+  }
+  return 0;
+}
+
+// Move cursor to the next line, scroll screen up if necessary and allowed.
+int move_next_line(struct screen *s, int allow_scroll) {
+  int scroll = 0;
+  if (s->y == s->lines - 1) { //
+    if (!allow_scroll) return 0; 
+    scroll_up(s);
+    scroll = -1;
+  } else {
+    s->y++;
+  }
+  return scroll;
+}
+
+// Move cursor right with horizontal wrapping.
+// Scroll screen up if necessary and allowed.
+int move_right(struct screen *s, int allow_scroll) {
+  if (s->x < s->columns - 1) {
+    s->x++;
+    return 0;
+  }
+
+  s->x = 0;
+  return move_next_line(s, allow_scroll);
+}
+
+// Move cursor left with horizontal wrapping.
+// TODO: Support scroll down. 
+int move_left (struct screen *s, int allow_scroll /* Not implemented */) {
+  if (s->x > 0) {
+    s->x--;
+    return 0;
+  }
+
+  s->x = s->columns - 1;
+  return move_prev_line(s, allow_scroll);
+}
+
+// Write character at the cursor position. If move != 0 move cursor left.
+// Go to the next line at the end of the line when allow_scroll != 0.
+// It returns change of Y coodinate in the case of scrolling. Y < 0 means scrolling up.
+int write(struct screen *s, char c, int move, int allow_scroll) {
+  if (c == '\n') {
+    s->x = 0;
+    return move_next_line(s, allow_scroll);
+  }
+  int pos_x = s->x * s->char_width;
+  int pos_y = (s->y_start + s->y * (s->char_height + s->line_dist)) % s->scroll_area;
+  // Need to make a background as drawChar with GFX font ignores background color.
+  tft.fillRect(pos_x, pos_y, s->char_width, s->char_height, s->bg_color);
+  tft.drawChar(pos_x, pos_y, c, s->text_color, s->bg_color, 1);
+
+  if (!move) return 0;
+
+  return move_right(s, allow_scroll);
+}
+
+// Cursor is an inverse symbol. 
+void draw_cursor(struct screen *s, char c, bool show) {
+  uint32_t text_color = s->text_color;
+  uint32_t bg_color = s->bg_color;
+
+  if (show) {
+    set_colors(s, s->bg_color, s->text_color);
+  }
+
+  write(s, c, false, false);
+
+  if (show) {
+    set_colors(s, text_color, bg_color);
+  }
+}
+
+// Global screen variable
+struct screen *S;
+
+
+
+
+
+
+
 // Error handling
 
 int modbacktrace (int n) {
@@ -5700,7 +5907,7 @@ object *fn_loadimage (object *args, object *env) {
 */
 object *fn_cls (object *args, object *env) {
   (void) args, (void) env;
-  pout(12);
+  reset(S);
   return nil;
 }
 
@@ -8505,195 +8712,7 @@ void prin1object (object *form, pfun_t pfun) {
 
 // PicoCalc terminal and keyboard support
 
-// Screen structure for text based interface that supports
-// hardware vertical scrolling
-struct screen {
-  // Total number of character lines and colunms on the screen
-  uint8_t lines;
-  uint8_t columns;
 
-  // Distance between lines in pixels
-  uint16_t line_dist;
-
-  // Font for TFT_eSPI
-  int font_id;
-
-  // Font dimentions in pixels
-  int16_t char_height;
-  int16_t char_width;
-
-  // Colors
-  uint32_t text_color;
-  uint32_t bg_color;
-
-  // Current position (column, lines) from the top left corner
-  uint8_t x;
-  uint8_t y;
-
-  // The number of the top pixelline. It is used for hardware
-  // vertical scrolling.
-  uint16_t y_start;
-
-  // Number of scrolls
-  uint16_t scrolls;
-
-  // Hardware scrolling parameters
-  uint16_t scroll_area; // Number of pixellines
-  uint16_t bfa;         // Bottom fixed area in pixellines
-};
-
-struct screen *init_screen() {
-  struct screen *s = (screen *)malloc(sizeof(screen));
-  memset(s, 0, sizeof(screen));
-
-  s->char_height = 8;
-  s->char_width = 6;
-  s->line_dist = 0;
-  s->font_id = 1;
-  
-  s->text_color = TFT_GREEN;
-  s->bg_color = TFT_BLACK;
-
-  s->lines = SCREEN_HEIGHT / (s->char_height + s->line_dist);
-  s->columns = SCREEN_WIDTH / s->char_width;
-
-  // Init display
-  tft = TFT_eSPI(SCREEN_WIDTH, SCREEN_HEIGHT);
-  tft.init();
-  tft.setRotation(0);
-  tft.invertDisplay(1);
-  tft.setTextWrap(false, false);     // Disable text wrapping
-
-  //tft.setFreeFont(GOHU_FONT);
-
-  // Configure vertical scrolling
-  s->scroll_area = s->lines * (s->char_height + s->line_dist);
-  s->bfa = SCREEN_ILI9488_HEIGHT - s->scroll_area;
-  tft.writecommand(VSCRDEF);         // Vertical scroll
-  tft.writedata(0);                  // Top Fixed Area line count
-  tft.writedata(0);
-  tft.writedata((s->scroll_area)>>8);    // Vertical Scrolling Area line count
-  tft.writedata((s->scroll_area) & 0xFF);
-  tft.writedata((s->bfa)>>8);                  // Bottom Fixed Area line count
-  tft.writedata((s->bfa) & 0xFF);
-
-  tft.fillScreen(s->bg_color);
-  return s;
-}
-
-int set_position(struct screen *s, int x, int y) {
-  if (x < 0 || x >= s->columns) return -1;
-  if (y < 0 || y >= s->lines) return -1;
-
-  s->x = x;
-  s->y = y;
-  return 0;
-}
-
-void set_colors(struct screen *s, uint32_t text, uint32_t bg) {
-  s->text_color = text;
-  s->bg_color = bg;
-}
-
-void scroll_up(screen *s) {
-  // Clear top line
-  tft.fillRect(0, s->y_start, SCREEN_WIDTH, s->char_height + s->line_dist, s->bg_color);
-  
-  s->y_start = s->y_start + s->char_height + s->line_dist;
-
-  // Wrapping around the scroll
-  // Will be more complicated with non zero TFA and BFA
-  if (s->y_start >= s->scroll_area) s->y_start = s->y_start - s->scroll_area;
-  //if (s->y_start >= s->scroll_area) s->y_start = 0;
-
-  tft.writecommand(VSCRSADD); // Vertical scrolling pointer
-  tft.writedata((s->y_start)>>8);
-  tft.writedata((s->y_start) & 0xFF);
-}
-
-// Move cursor to the prev line, 
-// TODO: support scroll down
-int move_prev_line(struct screen *s, int allow_scroll) {
-  if (s->y > 0) { //
-    s->y--;
-  }
-  return 0;
-}
-
-// Move cursor to the next line, scroll screen up if necessary and allowed.
-int move_next_line(struct screen *s, int allow_scroll) {
-  int scroll = 0;
-  if (s->y == s->lines - 1) { //
-    if (!allow_scroll) return 0; 
-    scroll_up(s);
-    scroll = -1;
-  } else {
-    s->y++;
-  }
-  return scroll;
-}
-
-// Move cursor right with horizontal wrapping.
-// Scroll screen up if necessary and allowed.
-int move_right(struct screen *s, int allow_scroll) {
-  if (s->x < s->columns - 1) {
-    s->x++;
-    return 0;
-  }
-
-  s->x = 0;
-  return move_next_line(s, allow_scroll);
-}
-
-// Move cursor left with horizontal wrapping.
-// TODO: Support scroll down. 
-int move_left (struct screen *s, int allow_scroll /* Not implemented */) {
-  if (s->x > 0) {
-    s->x--;
-    return 0;
-  }
-
-  s->x = s->columns - 1;
-  return move_prev_line(s, allow_scroll);
-}
-
-// Write character at the cursor position. If move != 0 move cursor left.
-// Go to the next line at the end of the line when allow_scroll != 0.
-// It returns change of Y coodinate in the case of scrolling. Y < 0 means scrolling up.
-int write(struct screen *s, char c, int move, int allow_scroll) {
-  if (c == '\n') {
-    s->x = 0;
-    return move_next_line(s, allow_scroll);
-  }
-  int pos_x = s->x * s->char_width;
-  int pos_y = (s->y_start + s->y * (s->char_height + s->line_dist)) % s->scroll_area;
-  // Need to make a background as drawChar with GFX font ignores background color.
-  tft.fillRect(pos_x, pos_y, s->char_width, s->char_height, s->bg_color);
-  tft.drawChar(pos_x, pos_y, c, s->text_color, s->bg_color, 1);
-
-  if (!move) return 0;
-
-  return move_right(s, allow_scroll);
-}
-
-// Cursor is an inverse symbol. 
-void draw_cursor(struct screen *s, char c, bool show) {
-  uint32_t text_color = s->text_color;
-  uint32_t bg_color = s->bg_color;
-
-  if (show) {
-    set_colors(s, s->bg_color, s->text_color);
-  }
-
-  write(s, c, false, false);
-
-  if (show) {
-    set_colors(s, text_color, bg_color);
-  }
-}
-
-// Global screen variable
-struct screen *S;
 
 
 /*
