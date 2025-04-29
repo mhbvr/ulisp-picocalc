@@ -48,7 +48,7 @@ const int COLOR_WHITE = 0xffff, COLOR_BLACK = 0;
 PCKeyboard pc_kbd;
 #define Serial Serial1     // PicoCalc uses Serial1
 const int KEY_ESC = 0xB1;
-TFT_eSPI tft = TFT_eSPI(320,320);
+TFT_eSPI tft;
 
 // Platform specific settings
 
@@ -57,6 +57,50 @@ TFT_eSPI tft = TFT_eSPI(320,320);
 #define RAMFUNC __attribute__ ((section (".ramfunctions")))
 #define MEMBANK
 
+// Screen size in pixels
+#define SCREEN_WIDTH  320
+#define SCREEN_ILI9488_HEIGHT 480
+#define SCREEN_HEIGHT 320
+
+// Display commands
+
+// Vertical Scrolling Start Address
+#define VSCRSADD 0x37
+// Vertical Scrolling Definition
+#define VSCRDEF 0x33
+
+#define MAX_HISTORY 10
+
+// Keycodes
+
+// Cursor movement
+#define ARROW_UP    0xB5
+#define ARROW_DOWN  0xB6
+#define ARROW_LEFT  0xB4
+#define ARROW_RIGHT 0xB7
+#define HOME        0xD2
+#define END         0xD5
+
+// Edit
+#define DELETE      0xD4
+#define BACKSPACE   0x08 
+#define TAB         0x09
+#define ENTER       0x0A
+
+// Managment
+#define INSERT      0xD1
+#define BREAK       0xD0
+#define ESC         0xB1
+#define F1          0x81
+#define F3          0x83
+#define F2          0x82
+#define F4          0x84
+#define F5          0x85
+#define F6          0x86
+#define F7          0x87
+#define F8          0x88
+#define F9          0x89
+#define F10         0x90
 // These five boards are compatible with PicoCalc (H versions are supplied with header pins soldered in):
 
 // RP2040 boards ***************************************************************
@@ -165,6 +209,7 @@ TFT_eSPI tft = TFT_eSPI(320,320);
 #define fntype(x)          (getminmax((uint16_t)(x))>>6)
 #define longsymbolp(x)     (((x)->name & 0x03) == 0)
 #define longnamep(x)       (((x) & 0x03) == 0)
+
 #define twist(x)           ((uint32_t)((x)<<2) | (((x) & 0xC0000000)>>30))
 #define untwist(x)         (((x)>>2 & 0x3FFFFFFF) | ((x) & 0x03)<<30)
 #define arraysize(x)       (sizeof(x) / sizeof(x[0]))
@@ -288,13 +333,13 @@ int modbacktrace (int n) {
   printbacktrace - prints a call backtrace for error messages and break.
 */
 void printbacktrace () {
-  if (TraceStart != TraceTop) pserial('[');
+  if (TraceStart != TraceTop) pout('[');
   int tracesize = modbacktrace(TraceTop-TraceStart);
   for (int i=1; i<=tracesize; i++) {
-    printsymbol(symbol(Backtrace[modbacktrace(TraceTop-i)]), pserial);
-    if (i!=tracesize) pfstring(" <- ", pserial);
+    printsymbol(symbol(Backtrace[modbacktrace(TraceTop-i)]), pout);
+    if (i!=tracesize) pfstring(" <- ", pout);
   }
-  if (TraceStart != TraceTop) pserial(']');
+  if (TraceStart != TraceTop) pout(']');
 }
 
 /*
@@ -302,16 +347,16 @@ void printbacktrace () {
   Prints: "Error: 'fname' string", where fname is the name of the Lisp function in which the error occurred.
 */
 void errorsub (symbol_t fname, const char *string) {
-  pfl(pserial); pfstring("Error", pserial);
-  if (TraceStart != TraceTop) pserial(' ');
+  pfl(pout); pfstring("Error", pout);
+  if (TraceStart != TraceTop) pout(' ');
   printbacktrace();
-  pfstring(": ", pserial);
+  pfstring(": ", pout);
   if (fname != sym(NIL)) {
-    pserial('\'');
-    psymbol(fname, pserial);
-    pserial('\''); pserial(' ');
+    pout('\'');
+    psymbol(fname, pout);
+    pout('\''); pout(' ');
   }
-  pfstring(string, pserial);
+  pfstring(string, pout);
 }
 
 void errorend () { GCStack = NULL; longjmp(*handler, 1); }
@@ -324,9 +369,9 @@ void errorend () { GCStack = NULL; longjmp(*handler, 1); }
 void errorsym (symbol_t fname, const char *string, object *symbol) {
   if (!tstflag(MUFFLEERRORS)) {
     errorsub(fname, string);
-    pserial(':'); pserial(' ');
-    printobject(symbol, pserial);
-    pln(pserial);
+    pout(':'); pout(' ');
+    printobject(symbol, pout);
+    pln(pout);
   }
   errorend();
 }
@@ -338,7 +383,7 @@ void errorsym (symbol_t fname, const char *string, object *symbol) {
 void errorsym2 (symbol_t fname, const char *string) {
   if (!tstflag(MUFFLEERRORS)) {
     errorsub(fname, string);
-    pln(pserial);
+    pln(pout);
   }
   errorend();
 }
@@ -364,10 +409,10 @@ void error2 (const char *string) {
   formaterr - displays a format error with a ^ pointing to the error
 */
 void formaterr (object *formatstr, const char *string, uint8_t p) {
-  pln(pserial); indent(4, ' ', pserial); printstring(formatstr, pserial); pln(pserial);
-  indent(p+5, ' ', pserial); pserial('^');
+  pln(pout); indent(4, ' ', pout); printstring(formatstr, pout); pln(pout);
+  indent(p+5, ' ', pout); pout('^');
   error2(string);
-  pln(pserial);
+  pln(pout);
   errorend();
 }
 
@@ -669,7 +714,7 @@ void gc (object *form, object *env) {
   markobject(env);
   sweep();
   #if defined(printgcs)
-  pfl(pserial); pserial('{'); pint(Freespace - start, pserial); pserial('}');
+  pfl(pout); pout('{'); pint(Freespace - start, pout); pout('}');
   #endif
 }
 
@@ -1791,10 +1836,10 @@ object *readarray (int d, object *args) {
   and then converting that to a bit array
 */
 object *readbitarray (gfun_t gfun) {
-  char ch = gfun();
+  int ch = gfun();
   object *head = NULL;
   object *tail = NULL;
-  while (!issp(ch) && !isbr(ch)) {
+  while (ch > 0 && !issp(ch) && !isbr(ch)) {
     if (ch != '0' && ch != '1') error2("illegal character in bit array");
     object *cell = cons(number(ch - '0'), NULL);
     if (head == NULL) head = cell;
@@ -1802,7 +1847,7 @@ object *readbitarray (gfun_t gfun) {
     tail = cell;
     ch = gfun();
   }
-  LastChar = ch;
+  if (ch > 0) LastChar = ch;
   int size = listlength(head);
   object *array = makearray(cons(number(size), NULL), number(0), true);
   size = (size + sizeof(int)*8 - 1)/(sizeof(int)*8);
@@ -1930,7 +1975,7 @@ object *readstring (uint8_t delim, bool esc, gfun_t gfun) {
   object *obj = newstring();
   object *tail = obj;
   int ch = gfun();
-  if (ch == -1) return nil;
+  if (ch == -1) error2("unexpected end of stream");
   while ((ch != delim) && (ch != -1)) {
     if (esc && ch == '\\') ch = gfun();
     buildstring(ch, &tail);
@@ -2084,11 +2129,11 @@ object *apropos (object *arg, bool print) {
     char *full = cstring(princtostring(var), buf2, 33);
     if (strstr(full, part) != NULL) {
       if (print) {
-        printsymbol(var, pserial); pserial(' '); pserial('(');
-        if (consp(val) && isbuiltin(car(val), LAMBDA)) pfstring("user function", pserial);
-        else if (consp(val) && car(val)->type == CODE) pfstring("code", pserial);
-        else pfstring("user symbol", pserial);
-        pserial(')'); pln(pserial);
+        printsymbol(var, pout); pout(' '); pout('(');
+        if (consp(val) && isbuiltin(car(val), LAMBDA)) pfstring("user function", pout);
+        else if (consp(val) && car(val)->type == CODE) pfstring("code", pout);
+        else pfstring("user symbol", pout);
+        pout(')'); pln(pout);
       } else {
         cdr(ptr) = cons(var, NULL); ptr = cdr(ptr);
       }
@@ -2102,11 +2147,11 @@ object *apropos (object *arg, bool print) {
     if (findsubstring(part, (builtin_t)i)) {
       if (print) {
         uint8_t fntype = fntype(i);
-        pbuiltin((builtin_t)i, pserial); pserial(' '); pserial('(');
-        if (fntype == FUNCTIONS) pfstring("function", pserial);
-        else if (fntype == SPECIAL_FORMS || fntype == TAIL_FORMS) pfstring("special form", pserial);
-        else pfstring("symbol/keyword", pserial);
-        pserial(')'); pln(pserial);
+        pbuiltin((builtin_t)i, pout); pout(' '); pout('(');
+        if (fntype == FUNCTIONS) pfstring("function", pout);
+        else if (fntype == SPECIAL_FORMS || fntype == TAIL_FORMS) pfstring("special form", pout);
+        else pfstring("symbol/keyword", pout);
+        pout(')'); pln(pout);
       } else {
         cdr(ptr) = cons(bsymbol(i), NULL); ptr = cdr(ptr);
       }
@@ -2225,9 +2270,9 @@ object *closure (int tc, symbol_t name, object *function, object *args, object *
   function = cdr(function);
   int trace = tracing(name);
   if (trace) {
-    indent(TraceDepth[trace-1]<<1, ' ', pserial);
-    pint(TraceDepth[trace-1]++, pserial);
-    pserial(':'); pserial(' '); pserial('('); printsymbol(symbol(name), pserial);
+    indent(TraceDepth[trace-1]<<1, ' ', pout);
+    pint(TraceDepth[trace-1]++, pout);
+    pout(':'); pout(' '); pout('('); printsymbol(symbol(name), pout);
   }
   object *params = first(function);
   if (!listp(params)) errorsym(name, notalist, params);
@@ -2272,12 +2317,12 @@ object *closure (int tc, symbol_t name, object *function, object *args, object *
         } else { value = first(args); args = cdr(args); }
       }
       push(cons(var,value), *env);
-      if (trace) { pserial(' '); printobject(value, pserial); }
+      if (trace) { pout(' '); printobject(value, pout); }
     }
     params = cdr(params);
   }
   if (args != NULL) errorsym2(name, toomanyargs);
-  if (trace) { pserial(')'); pln(pserial); }
+  if (trace) { pout(')'); pln(pout); }
   // Do an implicit progn
   if (tc) push(nil, *env);
   return tf_progn(function, *env);
@@ -2696,7 +2741,7 @@ void serialend (int address) {
 gfun_t gstreamfun (object *args) {
   int streamtype = SERIALSTREAM;
   int address = 0;
-  gfun_t gfun = gserial;
+  gfun_t gfun = ginput_line;
   if (args != NULL) {
     int stream = isstream(first(args));
     streamtype = stream>>8; address = stream & 0xFF;
@@ -2713,7 +2758,7 @@ gfun_t gstreamfun (object *args) {
     #endif
   }
   else if (streamtype == SERIALSTREAM) {
-    if (address == 0) gfun = gserial;
+    if (address == 0) gfun = ginput_line;
     #if defined(ULISP_SERIAL3)
     else if (address == 1) gfun = serial1read;
     else if (address == 2) gfun = serial2read;
@@ -2766,7 +2811,7 @@ inline void gfxwrite (char c) { tft.write(c); }
 pfun_t pstreamfun (object *args) {
   int streamtype = SERIALSTREAM;
   int address = 0;
-  pfun_t pfun = pserial;
+  pfun_t pfun = pout;
   if (args != NULL && first(args) != NULL) {
     int stream = isstream(first(args));
     streamtype = stream>>8; address = stream & 0xFF;
@@ -2782,7 +2827,7 @@ pfun_t pstreamfun (object *args) {
     else pfun = spi1write;
     #endif
   } else if (streamtype == SERIALSTREAM) {
-    if (address == 0) pfun = pserial;
+    if (address == 0) pfun = pout;
     #if defined(ULISP_SERIAL3)
     else if (address == 1) pfun = serial1write;
     else if (address == 2) pfun = serial2write;
@@ -2967,17 +3012,17 @@ void superprint (object *form, int lm, pfun_t pfun) {
 object *edit (object *fun) {
   while (1) {
     if (tstflag(EXITEDITOR)) return fun;
-    char c = gserial();
+    char c = ginput_line();
     if (c == 'q') setflag(EXITEDITOR);
     else if (c == 'b') return fun;
-    else if (c == 'r') fun = read(gserial);
-    else if (c == '\n') { pfl(pserial); superprint(fun, 0, pserial); pln(pserial); }
-    else if (c == 'c') fun = cons(read(gserial), fun);
-    else if (atom(fun)) pserial('!');
+    else if (c == 'r') fun = read(ginput_line);
+    else if (c == '\n') { pfl(pout); superprint(fun, 0, pout); pln(pout); }
+    else if (c == 'c') fun = cons(read(ginput_line), fun);
+    else if (atom(fun)) pout('!');
     else if (c == 'd') fun = cons(car(fun), edit(cdr(fun)));
     else if (c == 'a') fun = cons(edit(car(fun)), cdr(fun));
     else if (c == 'x') fun = cdr(fun);
-    else pserial('?');
+    else pout('?');
   }
 }
 
@@ -3006,8 +3051,8 @@ void putcode (object *arg, int origin, int pc) {
   MyCode[origin+pc] = code & 0xff;
   MyCode[origin+pc+1] = (code>>8) & 0xff;
   #if defined(assemblerlist)
-  printhex4(pc, pserial);
-  printhex4(code, pserial);
+  printhex4(pc, pout);
+  printhex4(code, pout);
   #endif
 #endif
 }
@@ -3019,9 +3064,9 @@ int assemble (int pass, int origin, object *entries, object *env, object *pcpair
     if (symbolp(arg)) {
       if (pass == 2) {
         #if defined(assemblerlist)
-        printhex4(pc, pserial);
-        indent(5, ' ', pserial);
-        printobject(arg, pserial); pln(pserial);
+        printhex4(pc, pout);
+        indent(5, ' ', pout);
+        printobject(arg, pout); pln(pout);
         #endif
       } else {
         object *pair = findvalue(arg, env);
@@ -3035,8 +3080,8 @@ int assemble (int pass, int origin, object *entries, object *env, object *pcpair
           if (pass == 2) {
             putcode(first(arglist), origin, pc);
             #if defined(assemblerlist)
-            if (arglist == argval) superprint(arg, 0, pserial);
-            pln(pserial);
+            if (arglist == argval) superprint(arg, 0, pout);
+            pln(pout);
             #endif
           }
           pc = pc + 2;
@@ -3047,7 +3092,7 @@ int assemble (int pass, int origin, object *entries, object *env, object *pcpair
         if (pass == 2) {
           putcode(argval, origin, pc);
           #if defined(assemblerlist)
-          superprint(arg, 0, pserial); pln(pserial);
+          superprint(arg, 0, pout); pln(pout);
           #endif
         }
         pc = pc + 2;
@@ -3459,16 +3504,16 @@ object *sp_time (object *args, object *env) {
   unsigned long start = millis();
   object *result = eval(first(args), env);
   unsigned long elapsed = millis() - start;
-  printobject(result, pserial);
-  pfstring("\nTime: ", pserial);
+  printobject(result, pout);
+  pfstring("\nTime: ", pout);
   if (elapsed < 1000) {
-    pint(elapsed, pserial);
-    pfstring(" ms\n", pserial);
+    pint(elapsed, pout);
+    pfstring(" ms\n", pout);
   } else {
     elapsed = elapsed+50;
-    pint(elapsed/1000, pserial);
-    pserial('.'); pint((elapsed/100)%10, pserial);
-    pfstring(" s\n", pserial);
+    pint(elapsed/1000, pout);
+    pout('.'); pint((elapsed/100)%10, pout);
+    pfstring(" s\n", pout);
   }
   return bsymbol(NOTHING);
 }
@@ -5426,7 +5471,7 @@ object *fn_makunbound (object *args, object *env) {
 */
 object *fn_break (object *args, object *env) {
   (void) args;
-  pfstring("\nBreak!\n", pserial);
+  pfstring("\nBreak!\n", pout);
   BreakLevel++;
   repl(env);
   BreakLevel--;
@@ -5527,7 +5572,7 @@ object *fn_writebyte (object *args, object *env) {
   (void) env;
   int c = checkinteger(first(args));
   pfun_t pfun = pstreamfun(cdr(args));
-  if (c == '\n' && pfun == pserial) Serial.write('\n');
+  if (c == '\n' && pfun == pout) Serial.write('\n');
   else (pfun)(c);
   return nil;
 }
@@ -5600,11 +5645,11 @@ object *fn_gc (object *args, object *env) {
     unsigned long start = micros();
     gc(args, env);
     unsigned long elapsed = micros() - start;
-    pfstring("Space: ", pserial);
-    pint(Freespace - initial, pserial);
-    pfstring(" bytes, Time: ", pserial);
-    pint(elapsed, pserial);
-    pfstring(" us\n", pserial);
+    pfstring("Space: ", pout);
+    pint(Freespace - initial, pout);
+    pfstring(" bytes, Time: ", pout);
+    pint(elapsed, pout);
+    pfstring(" us\n", pout);
   } else gc(args, env);
   return nil;
 }
@@ -5655,7 +5700,7 @@ object *fn_loadimage (object *args, object *env) {
 */
 object *fn_cls (object *args, object *env) {
   (void) args, (void) env;
-  pserial(12);
+  pout(12);
   return nil;
 }
 
@@ -5947,7 +5992,7 @@ object *fn_pprintall (object *args, object *env) {
 */
 object *fn_format (object *args, object *env) {
   (void) env;
-  pfun_t pfun = pserial;
+  pfun_t pfun = pout;
   object *output = first(args);
   object *obj;
   if (output == nil) { obj = startstring(); pfun = pstr; }
@@ -6063,7 +6108,7 @@ object *fn_listlibrary (object *args, object *env) {
   while (line != NULL) {
     builtin_t bname = builtin(first(line)->name);
     if (bname == DEFUN || bname == DEFVAR) {
-      printsymbol(second(line), pserial); pserial(' ');
+      printsymbol(second(line), pout); pout(' ');
     }
     line = read(glibrary);
   }
@@ -6082,7 +6127,7 @@ object *sp_help (object *args, object *env) {
   if (docstring) {
     flags_t temp = Flags;
     clrflag(PRINTREADABLY);
-    printstring(docstring, pserial);
+    printstring(docstring, pout);
     Flags = temp;
   }
   return bsymbol(NOTHING);
@@ -6192,9 +6237,9 @@ object *sp_error (object *args, object *env) {
   if (!tstflag(MUFFLEERRORS)) {
     flags_t temp = Flags;
     clrflag(PRINTREADABLY);
-    pfstring("Error: ", pserial); printstring(message, pserial);
+    pfstring("Error: ", pout); printstring(message, pout);
     Flags = temp;
-    pln(pserial);
+    pln(pout);
   }
   GCStack = NULL;
   longjmp(*handler, 1);
@@ -8133,11 +8178,11 @@ object *eval (object *form, object *env) {
       if (trace || tstflag(BACKTRACE)) {
         object *result = eval(form, env);
         if (trace) {
-          indent((--(TraceDepth[trace-1]))<<1, ' ', pserial);
-          pint(TraceDepth[trace-1], pserial);
-          pserial(':'); pserial(' ');
-          printobject(fname, pserial); pfstring(" returned ", pserial);
-          printobject(result, pserial); pln(pserial);
+          indent((--(TraceDepth[trace-1]))<<1, ' ', pout);
+          pint(TraceDepth[trace-1], pout);
+          pout(':'); pout(' ');
+          printobject(fname, pout); pfstring(" returned ", pout);
+          printobject(result, pout); pln(pout);
         }
         if (tstflag(BACKTRACE)) TraceTop = modbacktrace(TraceTop-1);
         return result;
@@ -8176,18 +8221,6 @@ object *eval (object *form, object *env) {
 }
 
 // Print functions
-
-/*
-  pserial - prints a character to the serial port
-*/
-void pserial (char c) {
-  LastPrint = c;
-  if (!tstflag(NOECHO)) Display(c);         // Don't display when paste in listing
-  #if defined (serialmonitor)
-  if (c == '\n') Serial.write('\r');
-  Serial.write(c);
-  #endif
-}
 
 const char ControlCodes[] = "Null\0SOH\0STX\0ETX\0EOT\0ENQ\0ACK\0Bell\0Backspace\0Tab\0Newline\0VT\0"
 "Page\0Return\0SO\0SI\0DLE\0DC1\0DC2\0DC3\0DC4\0NAK\0SYN\0ETB\0CAN\0EM\0SUB\0Escape\0FS\0GS\0RS\0US\0Space\0";
@@ -8472,185 +8505,518 @@ void prin1object (object *form, pfun_t pfun) {
 
 // PicoCalc terminal and keyboard support
 
-const int ScreenWidth = 320, ScreenHeight = 320;
-const int Columns = 53;
-const int Leading = 10; // Between 8 and 10
-const int Lines = ScreenHeight/Leading;
-const int LastColumn = Columns-1;
-const int LastLine = Lines-1;
-const char Cursor = 0x5f;
+// Screen structure for text based interface that supports
+// hardware vertical scrolling
+struct screen {
+  // Total number of character lines and colunms on the screen
+  uint8_t lines;
+  uint8_t columns;
 
-volatile int WritePtr = 0, ReadPtr = 0, LastWritePtr = 0;
-const int KybdBufSize = Columns*Lines;
-char KybdBuf[KybdBufSize], ScrollBuf[Columns][Lines];
-volatile uint8_t KybdAvailable = 0;
-uint8_t Scroll = 0;
+  // Distance between lines in pixels
+  uint16_t line_dist;
 
-// Terminal **********************************************************************************
+  // Font for TFT_eSPI
+  int font_id;
 
-// Plot character at absolute character cell position
-void PlotChar (uint8_t ch, uint8_t line, uint8_t column) {
- #if defined(gfxsupport)
-  uint16_t y = line*Leading;
-  uint16_t x = column*6;
-  ScrollBuf[column][(line+Scroll) % Lines] = ch;
-  if (ch & 0x80) {
-    tft.drawChar(x, y, ch & 0x7f, TFT_BLACK, TFT_GREEN, 1);
+  // Font dimentions in pixels
+  int16_t char_height;
+  int16_t char_width;
+
+  // Colors
+  uint32_t text_color;
+  uint32_t bg_color;
+
+  // Current position (column, lines) from the top left corner
+  uint8_t x;
+  uint8_t y;
+
+  // The number of the top pixelline. It is used for hardware
+  // vertical scrolling.
+  uint16_t y_start;
+
+  // Number of scrolls
+  uint16_t scrolls;
+
+  // Hardware scrolling parameters
+  uint16_t scroll_area; // Number of pixellines
+  uint16_t bfa;         // Bottom fixed area in pixellines
+};
+
+struct screen *init_screen() {
+  struct screen *s = (screen *)malloc(sizeof(screen));
+  memset(s, 0, sizeof(screen));
+
+  s->char_height = 8;
+  s->char_width = 6;
+  s->line_dist = 0;
+  s->font_id = 1;
+  
+  s->text_color = TFT_GREEN;
+  s->bg_color = TFT_BLACK;
+
+  s->lines = SCREEN_HEIGHT / (s->char_height + s->line_dist);
+  s->columns = SCREEN_WIDTH / s->char_width;
+
+  // Init display
+  tft = TFT_eSPI(SCREEN_WIDTH, SCREEN_HEIGHT);
+  tft.init();
+  tft.setRotation(0);
+  tft.invertDisplay(1);
+  tft.setTextWrap(false, false);     // Disable text wrapping
+
+  //tft.setFreeFont(GOHU_FONT);
+
+  // Configure vertical scrolling
+  s->scroll_area = s->lines * (s->char_height + s->line_dist);
+  s->bfa = SCREEN_ILI9488_HEIGHT - s->scroll_area;
+  tft.writecommand(VSCRDEF);         // Vertical scroll
+  tft.writedata(0);                  // Top Fixed Area line count
+  tft.writedata(0);
+  tft.writedata((s->scroll_area)>>8);    // Vertical Scrolling Area line count
+  tft.writedata((s->scroll_area) & 0xFF);
+  tft.writedata((s->bfa)>>8);                  // Bottom Fixed Area line count
+  tft.writedata((s->bfa) & 0xFF);
+
+  tft.fillScreen(s->bg_color);
+  return s;
+}
+
+int set_position(struct screen *s, int x, int y) {
+  if (x < 0 || x >= s->columns) return -1;
+  if (y < 0 || y >= s->lines) return -1;
+
+  s->x = x;
+  s->y = y;
+  return 0;
+}
+
+void set_colors(struct screen *s, uint32_t text, uint32_t bg) {
+  s->text_color = text;
+  s->bg_color = bg;
+}
+
+void scroll_up(screen *s) {
+  // Clear top line
+  tft.fillRect(0, s->y_start, SCREEN_WIDTH, s->char_height + s->line_dist, s->bg_color);
+  
+  s->y_start = s->y_start + s->char_height + s->line_dist;
+
+  // Wrapping around the scroll
+  // Will be more complicated with non zero TFA and BFA
+  if (s->y_start >= s->scroll_area) s->y_start = s->y_start - s->scroll_area;
+  //if (s->y_start >= s->scroll_area) s->y_start = 0;
+
+  tft.writecommand(VSCRSADD); // Vertical scrolling pointer
+  tft.writedata((s->y_start)>>8);
+  tft.writedata((s->y_start) & 0xFF);
+}
+
+// Move cursor to the prev line, 
+// TODO: support scroll down
+int move_prev_line(struct screen *s, int allow_scroll) {
+  if (s->y > 0) { //
+    s->y--;
+  }
+  return 0;
+}
+
+// Move cursor to the next line, scroll screen up if necessary and allowed.
+int move_next_line(struct screen *s, int allow_scroll) {
+  int scroll = 0;
+  if (s->y == s->lines - 1) { //
+    if (!allow_scroll) return 0; 
+    scroll_up(s);
+    scroll = -1;
   } else {
-    tft.drawChar(x, y, ch & 0x7f, TFT_WHITE, TFT_BLACK, 1);
+    s->y++;
   }
-#endif
+  return scroll;
 }
 
-// Clears the bottom line and then scrolls the display up by one line
-void ScrollDisplay () {
-  #if defined(gfxsupport)
-  tft.fillRect(0, 320-Leading, 320, 10, TFT_BLACK);
-  for (uint8_t x = 0; x < Columns; x++) {
-    char c = ScrollBuf[x][Scroll];
-    for (uint8_t y = 0; y < Lines-1; y++) {
-      char c2 = ScrollBuf[x][(y+Scroll+1) % Lines];
-      if (c != c2) {
-        if (c2 & 0x80) {
-          tft.drawChar(x*6, y*Leading, c2 & 0x7f, TFT_BLACK, TFT_GREEN, 1);
-        } else {
-          tft.drawChar(x*6, y*Leading, c2 & 0x7f, TFT_WHITE, TFT_BLACK, 1);
+// Move cursor right with horizontal wrapping.
+// Scroll screen up if necessary and allowed.
+int move_right(struct screen *s, int allow_scroll) {
+  if (s->x < s->columns - 1) {
+    s->x++;
+    return 0;
+  }
+
+  s->x = 0;
+  return move_next_line(s, allow_scroll);
+}
+
+// Move cursor left with horizontal wrapping.
+// TODO: Support scroll down. 
+int move_left (struct screen *s, int allow_scroll /* Not implemented */) {
+  if (s->x > 0) {
+    s->x--;
+    return 0;
+  }
+
+  s->x = s->columns - 1;
+  return move_prev_line(s, allow_scroll);
+}
+
+// Write character at the cursor position. If move != 0 move cursor left.
+// Go to the next line at the end of the line when allow_scroll != 0.
+// It returns change of Y coodinate in the case of scrolling. Y < 0 means scrolling up.
+int write(struct screen *s, char c, int move, int allow_scroll) {
+  if (c == '\n') {
+    s->x = 0;
+    return move_next_line(s, allow_scroll);
+  }
+  int pos_x = s->x * s->char_width;
+  int pos_y = (s->y_start + s->y * (s->char_height + s->line_dist)) % s->scroll_area;
+  // Need to make a background as drawChar with GFX font ignores background color.
+  tft.fillRect(pos_x, pos_y, s->char_width, s->char_height, s->bg_color);
+  tft.drawChar(pos_x, pos_y, c, s->text_color, s->bg_color, 1);
+
+  if (!move) return 0;
+
+  return move_right(s, allow_scroll);
+}
+
+// Cursor is an inverse symbol. 
+void draw_cursor(struct screen *s, char c, bool show) {
+  uint32_t text_color = s->text_color;
+  uint32_t bg_color = s->bg_color;
+
+  if (show) {
+    set_colors(s, s->bg_color, s->text_color);
+  }
+
+  write(s, c, false, false);
+
+  if (show) {
+    set_colors(s, text_color, bg_color);
+  }
+}
+
+// Global screen variable
+struct screen *S;
+
+
+/*
+  pout - prints a character to the output.
+*/
+void pout (char c) {
+  LastPrint = c;
+  write(S, c, 1, 1);
+}
+
+// Linked list of text lines.
+// Used to store history of inputs for the terminal
+
+struct line {
+  char *buffer;
+  int size;
+  line *next;
+  line *prev;
+};
+
+// Initialize new line with (zeroed).
+struct line *init_line() {
+  struct line *l = (struct line *)malloc(sizeof(struct line));
+  memset(l, 0, sizeof(struct line));
+  return l;
+}
+
+void free_line(struct line *l) {
+  free(l->buffer);
+  free(l);
+}
+
+// Insert line to the list after current and return poiter to the new line
+struct line *insert_line(struct line *l, struct line *n) {
+  if (l == NULL) return n;
+
+  n->next = l->next;
+  n->prev = l;
+
+  if (l->next != NULL) l->next->prev = n;
+  l->next = n;
+  
+  return n;
+}
+
+// Remove line from the list.
+struct line *extract_line(struct line *l) {
+  struct line *res = NULL;
+  if (l->prev != NULL) {
+    l->prev->next = l->next;
+    res = l->prev;
+  }
+  if (l->next != NULL) {
+    l->next->prev = l->prev;
+    res = l->next;
+  }
+  l->next = NULL;
+  l->prev = NULL;
+  return res;
+}
+
+void delete_line(struct line *l) {
+  extract_line(l);
+  free_line(l);
+}
+
+struct line *first_line(struct line *l) {
+  while (l != NULL && l->prev != NULL) l = l->prev;
+  return l;
+}
+
+struct line *last_line(struct line *l) {
+  while (l != NULL && l->next != NULL) l = l->next;
+  return l;
+}
+
+void add_char(struct line *l, char c, int pos) {
+  if (pos < 0 || pos > l->size) return;
+  l->size++;
+  l->buffer = (char *)realloc(l->buffer, sizeof(char) * (l->size + 1));
+  
+  // Shift symbols right by 1 starting from pos
+  for (int i = l->size - 1; i > pos; i--) {
+    l->buffer[i] = l->buffer[i-1];
+  }
+ 
+  l->buffer[pos] = c;
+  l->buffer[l->size] = 0;
+}
+
+void del_char(struct line *l, int pos) {
+  if (pos < 0 || pos >= l->size) return;
+
+  for (int i = pos; i < l->size - 1; i++) {
+    l->buffer[i] = l->buffer[i+1];
+  }
+
+  l->size--;
+  l->buffer = (char *)realloc(l->buffer, sizeof(char) * l->size);
+}
+
+
+// Terminal with line editor and history support.
+
+struct terminal {
+  struct line *line;
+  uint8_t num_lines;
+  uint8_t max_history;
+
+  // Cursor position in the line
+  int pos;
+
+  // Position of the line start on the screen.
+  // start_y should be updated after scrolling.
+  uint8_t start_x;
+  uint8_t start_y;
+};
+
+struct terminal *init_terminal() {
+  struct terminal *t = (struct terminal*)malloc(sizeof(struct terminal));
+  if (t == NULL) return t;
+  memset(t, 0, sizeof(struct terminal));
+  t->max_history = MAX_HISTORY;
+
+  return t;
+}
+
+// Used to print data on screen.
+// Return space char when line is NULL or position out of bound.
+char get_c(struct terminal *t ) {
+  if (t->line == NULL || t->pos >= t->line->size || t->pos < 0) return ' ';
+  return t->line->buffer[t->pos];
+}
+
+// Returns X position on the screen of the current text symbol.
+int get_x(struct terminal *t, struct screen *s) {
+  return (t->start_x + t->pos) % s->columns;
+}
+
+// Returns Y position on the screen of the current text symbol.
+int get_y(struct terminal *t, struct screen *s) {
+  return t->start_y + (t->start_x + t->pos) / s->columns;
+}
+
+// Length of the current line
+int get_len(struct terminal *t) {
+  if (t->line == NULL) return 0;
+  return t->line->size;
+}
+
+void move_cursor(struct terminal *t, struct screen *s, char key) {
+  draw_cursor(s, get_c(t), 0);
+  
+  switch(key) {
+  case ARROW_LEFT:
+    if (t->pos == 0) break;  // line start
+    t->pos--;
+    move_left(s, 0);  // Scrolling not allowed
+    break;
+  case ARROW_RIGHT:
+    if (t->pos == get_len(t)) break; // position after line end
+    t->pos++;
+    move_right(s, 0); // Scrolling not allowed
+    break;
+  case HOME:
+    t->pos = 0; 
+    set_position(s, t->start_x, t->start_y);
+    break;
+  case END:
+    t->pos = get_len(t);
+    set_position(s, get_x(t, s), get_y(t, s));
+    break;
+  }
+
+  draw_cursor(s, get_c(t), 1);
+}
+
+void print_line(struct terminal *t, struct screen *s, int size) {
+  int x = get_x(t, s);
+  int y = get_y(t, s);
+  int pos = t->pos;
+  int dy = 0;
+  while (t->pos < size) {
+    dy += write(s, get_c(t), 1, 1); 
+    t->pos++;
+  }
+  // Adjust start of line because of scrolling
+  t->start_y += dy;
+  // Return cursor to the original positions
+  t->pos = pos;
+  set_position(s, x, y + dy);
+}
+
+void show_line(struct terminal *t, struct screen *s, struct line *l) {
+  // Go to the line start
+  t->pos = 0;
+  set_position(s, t->start_x, t->start_y);
+  int old_len = get_len(t);
+  t->line = l;
+  print_line(t, s, max(get_len(t), old_len) + 1);
+}
+
+bool is_printable(char c) {
+  if (c >= 0x20 && c <= 0x7e) return true;
+  return false;
+}
+
+struct line * read_line(struct terminal *t, struct screen *s) {
+  if (t->num_lines > t->max_history) {
+    delete_line(first_line(t->line));
+    t->num_lines--;
+  }
+
+  if (t->line == NULL || t->line->size > 0) {
+    // First run or non empty prev input
+    t->line = insert_line(t->line, init_line());
+    t->num_lines++;
+  }
+
+//  write(s, '>', 1, 1);
+//  write(s, ' ', 1, 1);
+  draw_cursor(s, ' ', 1);
+  
+  t->pos = 0;
+  t->start_x = s->x;
+  t->start_y = s->y;
+
+  while (1) {
+    if (pc_kbd.keyCount() > 0) {
+      PCKeyboard::KeyEvent event = pc_kbd.keyEvent();
+      if (event.state ==  PCKeyboard::StatePress) {
+        
+        if (is_printable(event.key)) {
+          draw_cursor(s, get_c(t), 0);
+          add_char(t->line, event.key, t->pos);
+          print_line(t, s, get_len(t) + 1);
+          t->pos++;
+          move_right(s, 1);
+          draw_cursor(s, get_c(t), 1);
+          continue;
         }
-        c = c2;
+
+        switch(event.key) {
+        case ARROW_UP:
+          // TODO: Prev input from history
+          if (t->line->prev == NULL) break;
+          show_line(t, s, t->line->prev);
+          draw_cursor(s, get_c(t), 1);
+          break;
+        case ARROW_DOWN:
+          // TODO: Next input from history
+          if (t->line->next == NULL) break;
+          show_line(t, s, t->line->next);
+          draw_cursor(s, get_c(t), 1);
+          break;
+        case ARROW_LEFT:
+        case ARROW_RIGHT:
+        case HOME:
+        case END:
+          move_cursor(t, s, event.key);
+          break;
+        case DELETE:
+          // Delete symbol in the cursor position
+          if (t->pos == get_len(t)) continue;
+          del_char(t->line, t->pos);
+          print_line(t, s, get_len(t) + 1);
+          draw_cursor(s, get_c(t), 1); 
+          break;
+        case BACKSPACE:
+          // Delete symbol before cursor
+          if (t->pos == 0) continue;
+          if (t->pos == get_len(t)) draw_cursor(s, ' ', 0);
+          t->pos--;
+          move_left(s, 1);
+          del_char(t->line, t->pos);
+          print_line(t, s, get_len(t) + 1);
+          draw_cursor(s, get_c(t), 1); 
+          break;
+        case ENTER:
+          // TODO: 0 at the end.
+          // Clear cursor
+          draw_cursor(s, get_c(t), 0);
+
+          // Move to the end of line
+          t->pos = get_len(t);
+          set_position(s, get_x(t, s), get_y(t, s));
+
+          // Move to the start of the next line
+          move_next_line(s, 1);
+          s->x = 0;
+
+          // Check if the line is not the last one
+          // It means it is history line.
+          if (t->line->next != NULL) {
+            // Drop the new line as we use the history
+            delete_line(last_line(t->line));
+            t->num_lines--;
+            
+            struct line *current = t->line;
+            t->line = extract_line(current);
+            t->line = insert_line(last_line(t->line), current);
+          }
+          return t->line;
+          break;
+        }
       }
     }
   }
-  // Tidy up graphics
-  for (uint8_t y = 0; y < Lines-1; y++) tft.fillRect(0, y*Leading+8, 320, 2, TFT_BLACK);
-  tft.fillRect(318, 0, 3, 320, TFT_BLACK);
-  for (int x=0; x<Columns; x++) ScrollBuf[x][Scroll] = 0;
-  Scroll = (Scroll + 1) % Lines;
-  #endif
 }
 
-const char VT = 11; // Vertical tab
-const char BEEP = 7;
-
-// Prints a character to display, with cursor, handling control characters
-void Display (char c) {
-  #if defined(gfxsupport)
-  static uint8_t line = 0, column = 0;
-  // These characters don't affect the cursor
-  if (c == 8) {                            // Backspace
-    if (column == 0) {
-      line--; column = LastColumn;
-    } else column--;
-    return;
-  }
-  if (c == 9) {                            // Cursor forward
-    if (column == LastColumn) {
-      line++; column = 0;
-    } else column++;
-    return;
-  }
-  if ((c >= 17) && (c <= 20)) {            // Parentheses
-    if (c == 17) PlotChar('(', line, column);
-    else if (c == 18) PlotChar('(' | 0x80, line, column);
-    else if (c == 19) PlotChar(')', line, column);
-    else PlotChar(')' | 0x80, line, column);
-    return;
-  }
-  // Hide cursor
-  PlotChar(' ', line, column);
-  if (c == 0x7F) {                         // DEL
-    if (column == 0) {
-      line--; column = LastColumn;
-    } else column--;
-  } else if ((c & 0x7f) >= 32) {           // Normal character
-    PlotChar(c, line, column++);
-    if (column > LastColumn) {
-      column = 0;
-      if (line == LastLine) ScrollDisplay(); else line++;
-    }
-  // Control characters
-  } else if (c == 12) {                    // Clear display
-    tft.fillScreen(COLOR_BLACK); line = 0; column = 0; Scroll = 0;
-    for (int col = 0; col < Columns; col++) {
-      for (int row = 0; row < Lines; row++) {
-        ScrollBuf[col][row] = 0;
-      }
-    }
-  } else if (c == '\n') {                  // Newline
-    column = 0;
-    if (line == LastLine) ScrollDisplay(); else line++;
-  } else if (c == VT) {            // Used by Lisp Screen Editor
-    column = 0; Scroll = 0; line = LastLine - 2;
-  } else if (c == BEEP) tone(0, 440, 125); // Beep
-  // Show cursor
-  PlotChar(Cursor, line, column);
- #endif
-}
+struct terminal *T;
 
 // Keyboard **********************************************************************************
 
 void initkybd () {
   Wire1.setSDA(6);
   Wire1.setSCL(7);
-  Wire1.begin();
   Wire1.setClock(10000);
-  pc_kbd.begin(0x1f,&Wire1);
+  Wire1.begin();  
+  pc_kbd.begin(PCKEYBOARD_DEFAULT_ADDR, &Wire1);
 }
 
-// Parenthesis highlighting
-void Highlight (int p, uint8_t invert) {
-  if (p) {
-    for (int n=0; n < p; n++) Display(8);
-    Display(17 + invert);
-    for (int n=1; n < p; n++) Display(9);
-    Display(19 + invert);
-    Display(9);
-  }
-}
 
-void ProcessKey (char c) {
-  static int parenthesis = 0;
-  static bool string = false;
-  if (c == KEY_ESC) { setflag(ESCAPE); return; }    // Escape key
-  // Undo previous parenthesis highlight
-  Highlight(parenthesis, 0);
-  parenthesis = 0;
-  // Edit buffer
-  if (c == '\n' || c == '\r') {
-    pserial('\n');
-    KybdAvailable = 1;
-    ReadPtr = 0;
-    return;
-  }
-  if (c == 8 || c == 0x7f) {     // Backspace key
-    if (WritePtr > 0) {
-      WritePtr--;
-      Display(0x7F);
-      if (WritePtr) c = KybdBuf[WritePtr-1];
-    }
-  } else if (c == 0xD4) { // tab or ctrl-I
-    for (int i = 0; i < LastWritePtr; i++) Display(KybdBuf[i]);
-    WritePtr = LastWritePtr;
-  } else if (WritePtr < KybdBufSize) {
-    if (c == '"') string = !string;
-    KybdBuf[WritePtr++] = c;
-    Display(c);
-  }
-  // Do new parenthesis highlight
-  if (c == ')' && !string) {
-    int search = WritePtr-1, level = 0; bool string2 = false;
-    while (search >= 0 && parenthesis == 0) {
-      c = KybdBuf[search--];
-      if (c == '"') string2 = !string2;
-      if (c == ')' && !string2) level++;
-      if (c == '(' && !string2) {
-        level--;
-        if (level == 0) parenthesis = WritePtr-search-1;
-      }
-    }
-    Highlight(parenthesis, 1);
-  }
-  return;
-}
 // Read functions
 
 /*
@@ -8680,187 +9046,191 @@ void loadfromlibrary (object *env) {
   }
 }
 
-/*
-  gserial - gets a character from the serial port
-*/
-int gserial () {
+
+// Get character from input line
+
+struct line *input_line;
+int line_pos;
+
+int ginput_line() {
   if (LastChar) {
     char temp = LastChar;
     LastChar = 0;
     return temp;
   }
-  #if defined (serialmonitor)
-  unsigned long start = millis();
-  while (!KybdAvailable) {
-    if (millis() - start > 1000) clrflag(NOECHO);
-    if (Serial.available()) {
-      char temp = Serial.read();
-      if (temp != '\n' && !tstflag(NOECHO)) Serial.print(temp);
-      return temp;
-    } else {
-      // PicoCalc keyboard
-      if (pc_kbd.keyCount() > 0) {
-        const PCKeyboard::KeyEvent key = pc_kbd.keyEvent();
-        if (key.state == PCKeyboard::StatePress) {
-          char temp = key.key;
-          if ((temp != 0) && (temp !=255) && (temp != 0xA1) && (temp != 0xA2) && (temp != 0xA3) && (temp != 0xA4) && (temp != 0xA5)) {
-            ProcessKey(temp);
-          }
-        }
-      }
-    }
-  }
-  if (ReadPtr != WritePtr) return KybdBuf[ReadPtr++];
-  KybdAvailable = 0;
-  WritePtr = 0;
-  return '\n';
-  #else
-  while (!KybdAvailable) {
-    // PicoCalc keyboard
-    if (pc_kbd.keyCount() > 0) {
-      const PCKeyboard::KeyEvent key = pc_kbd.keyEvent();
-      if (key.state == PCKeyboard::StatePress) {
-        char temp = key.key;
-        if ((temp != 0) && (temp !=255) && (temp != 0xA1) && (temp != 0xA2) && (temp != 0xA3) && (temp != 0xA4) && (temp != 0xA5)) {
-          ProcessKey(temp);
-        }
-      }
-    }
-  }
-  if (ReadPtr != WritePtr) return KybdBuf[ReadPtr++];
-  KybdAvailable = 0;
-  WritePtr = 0;
-  return '\n';
-#endif
+
+  if (input_line == NULL || line_pos >= input_line->size) return -1;
+  return input_line->buffer[line_pos++];
 }
 
-/*
-  nextitem - reads the next token from the specified stream
-*/
+
+enum parser_state { INIT, HASH, COMMENT, LONGCOMMENT, DOTSYM, BUFFER, CHR, COMPLETE };
+uint8_t stream_error;
+
 object *nextitem (gfun_t gfun) {
-  int ch = gfun();
-  while(issp(ch)) ch = gfun();
+  int ch;
+  uint8_t state = INIT;
+  stream_error = 0;
 
-  if (ch == ';') {
-    do { ch = gfun(); if (ch == ';' || ch == '(') setflag(NOECHO); }
-    while(ch != '(');
-  }
-  if (ch == '\n') ch = gfun();
-  if (ch == -1) return nil;
-  if (ch == ')') return (object *)KET;
-  if (ch == '(') return (object *)BRA;
-  if (ch == '\'') return (object *)QUO;
-
-  // Parse string
-  if (ch == '"') return readstring('"', true, gfun);
-
-  // Parse symbol, character, or number
-  int index = 0, base = 10, sign = 1;
+  int index = 0;
   char buffer[BUFFERSIZE];
   int bufmax = BUFFERSIZE-3; // Max index
-  unsigned int result = 0;
-  bool isfloat = false;
-  float fresult = 0.0;
+  int next_ch;
+  
+  uint8_t base = 0;
 
-  if (ch == '+') {
-    buffer[index++] = ch;
+  // Read text token
+  while (state != COMPLETE) {
     ch = gfun();
-  } else if (ch == '-') {
-    sign = -1;
-    buffer[index++] = ch;
-    ch = gfun();
-  } else if (ch == '.') {
-    buffer[index++] = ch;
-    ch = gfun();
-    if (ch == ' ') return (object *)DOT;
-    isfloat = true;
-  }
-
-  // Parse reader macros
-  else if (ch == '#') {
-    ch = gfun();
-    char ch2 = ch & ~0x20; // force to upper case
-    if (ch == '\\') { // Character
-      base = 0; ch = gfun();
-      if (issp(ch) || isbr(ch)) return character(ch);
-      else LastChar = ch;
-    } else if (ch == '|') {
-      do { while (gfun() != '|'); }
-      while (gfun() != '#');
-      return nextitem(gfun);
-    } else if (ch2 == 'B') base = 2;
-    else if (ch2 == 'O') base = 8;
-    else if (ch2 == 'X') base = 16;
-    else if (ch == '\'') return nextitem(gfun);
-    else if (ch == '.') {
-      setflag(NOESC);
-      object *result = eval(read(gfun), NULL);
-      clrflag(NOESC);
-      return result;
+    if (ch < 0) {
+      break;
     }
-    else if (ch == '(') { LastChar = ch; return readarray(1, read(gfun)); }
-    else if (ch == '*') return readbitarray(gfun);
-    else if (ch >= '1' && ch <= '9' && (gfun() & ~0x20) == 'A') return readarray(ch - '0', read(gfun));
-    else error2("illegal character after #");
-    ch = gfun();
-  }
-  int valid; // 0=undecided, -1=invalid, +1=valid
-  if (ch == '.') valid = 0; else if (digitvalue(ch)<base) valid = 1; else valid = -1;
-  bool isexponent = false;
-  int exponent = 0, esign = 1;
-  float divisor = 10.0;
 
-  while(!issp(ch) && !isbr(ch) && index < bufmax) {
-    buffer[index++] = ch;
-    if (base == 10 && ch == '.' && !isexponent) {
-      isfloat = true;
-      fresult = result;
-    } else if (base == 10 && (ch == 'e' || ch == 'E')) {
-      if (!isfloat) { isfloat = true; fresult = result; }
-      isexponent = true;
-      if (valid == 1) valid = 0; else valid = -1;
-    } else if (isexponent && ch == '-') {
-      esign = -esign;
-    } else if (isexponent && ch == '+') {
-    } else {
-      int digit = digitvalue(ch);
-      if (digitvalue(ch)<base && valid != -1) valid = 1; else valid = -1;
-      if (isexponent) {
-        exponent = exponent * 10 + digit;
-      } else if (isfloat) {
-        fresult = fresult + digit / divisor;
-        divisor = divisor * 10.0;
-      } else {
-        result = result * base + digit;
+    switch (state) {
+    case INIT:
+      if (issp(ch)) break;
+      if (ch == ')') return (object *)KET;
+      if (ch == '(') return (object *)BRA;
+      if (ch == '\'') return (object *)QUO;
+      if (ch == '"') return readstring('"', true, gfun);
+
+      if (ch == ';') {
+        state = COMMENT;
+        break;
       }
-    }
-    ch = gfun();
-  }
 
+      if (ch == '#') {
+        state = HASH;
+        break;
+      }
+
+      if (ch == '.') {
+        buffer[index++] = ch;
+        state = DOTSYM;
+        break;
+      }
+      state = BUFFER;
+      // and handle the buffer
+    case CHR:
+    case BUFFER:
+      if (issp(ch)) {
+        state = COMPLETE;
+        break;
+      }
+
+      if (isbr(ch)) {
+        LastChar = ch;
+        state = COMPLETE;
+        break;
+      }
+
+      if (index >= bufmax) {
+        error2("token longer then read buffer");
+      }
+      buffer[index++] = ch;
+      break;
+    case COMMENT:
+      // Comment stopped on the first (.
+      if (ch == '(') return (object *)BRA;
+      break;
+    case HASH:
+      if ((ch & ~0x20) == 'B') {
+        base = 2;
+        state = BUFFER;
+      } else if ((ch & ~0x20) == 'O') {
+        base = 8;
+        state = BUFFER;
+      } else if ((ch & ~0x20) == 'X') {
+        base = 16;
+        state = BUFFER;
+      } else if (ch == '.') return eval(read(gfun), NULL);
+      else if (ch == '*') return readbitarray(gfun);
+      else if (ch == '\\') state = CHR;
+      else if (ch == '\'') state = INIT;
+      else if (ch == '|') state = LONGCOMMENT;
+      else if (ch == '(') {
+        LastChar = ch;
+        return readarray(1, read(gfun));
+      } else if (ch >= '1' && ch <= '9') {
+        next_ch = gfun();
+        if (next_ch < 0) error2("unexpected end of stream");
+        if ((next_ch & ~0x20) == 'A') return readarray(ch - '0', read(gfun));
+        error2("illegal array definition"); 
+      } else {
+        error2("illegal character after #");  
+      }
+      break;
+    case DOTSYM:
+      if (issp(ch)) return (object *)DOT;
+      buffer[index++] = ch;
+      state = BUFFER;
+      break;
+    case LONGCOMMENT:
+      if (ch != '|') break;
+      next_ch = gfun();
+      if (next_ch < 0) {
+        error2("unexpected end of stream");
+      }
+      if (next_ch == '#') state = INIT;
+      break;
+    }
+  }
   buffer[index] = '\0';
-  if (isbr(ch)) LastChar = ch;
-  if (isfloat && valid == 1) return makefloat(fresult * sign * pow(10, exponent * esign));
-  else if (valid == 1) {
-    if (base == 10 && result > ((unsigned int)INT_MAX+(1-sign)/2))
-      return makefloat((float)result*sign);
-    return number(result*sign);
-  } else if (base == 0) {
+
+  const char *p = ControlCodes;
+  char c = 0;
+  long int res_int;
+  float res_float;
+  int must_int = 0;
+  char *end;
+  builtin_t x;
+
+  switch (state) {
+  case INIT:
+  case COMMENT:
+    // Set stream error flag
+    stream_error = 1;
+    return nil;
+    break;
+  case LONGCOMMENT:
+  case HASH:
+    error2("unexpected end of stream");
+    break;
+  case CHR:
     if (index == 1) return character(buffer[0]);
-    const char *p = ControlCodes; char c = 0;
     while (c < 33) {
       if (strcasecmp(buffer, p) == 0) return character(c);
       p = p + strlen(p) + 1; c++;
     }
-    if (index == 3) return character((buffer[0]*10+buffer[1])*10+buffer[2]-5328);
+    if (index == 3) return character((buffer[0]*10+buffer[1])*10+buffer[2]-5328); // '0' = 48 4800+480+48 = 5328
     error2("unknown character");
+    break;
+  case COMPLETE:
+  case BUFFER:
+    if (base > 0) must_int = 1;
+    else base = 10;
+    
+    res_int = strtol(buffer, &end, base);
+    if (*end == '\0') return number(res_int);
+    if (must_int) error2("incorrect integer");
+
+    res_float = strtof(buffer, &end);
+    if (*end == '\0') return makefloat(res_float);
+
+    x = lookupbuiltin(buffer);
+    if (x == NIL) return nil;
+    if (x != ENDFUNCTIONS) return bsymbol(x);
+    if (index <= 6 && valid40(buffer)) return intern(twist(pack40(buffer)));
+    return internlong(buffer);
+    break;
+  case DOTSYM:
+    return (object *)DOT;
+    break;
   }
 
-  builtin_t x = lookupbuiltin(buffer);
-  if (x == NIL) return nil;
-  if (x != ENDFUNCTIONS) return bsymbol(x);
-  if (index <= 6 && valid40(buffer)) return intern(twist(pack40(buffer)));
-  return internlong(buffer);
+  return nil;
 }
+
 
 /*
   readrest - reads the remaining tokens from the specified stream
@@ -8876,10 +9246,12 @@ object *readrest (gfun_t gfun) {
     } else if (item == (object *)QUO) {
       item = cons(bsymbol(QUOTE), cons(read(gfun), NULL));
     } else if (item == (object *)DOT) {
+      if (tail == NULL) error2("dot without first element");
       tail->cdr = read(gfun);
       if (readrest(gfun) != NULL) error2("malformed list");
       return head;
     } else {
+      if (stream_error) error2("unexpected end of stream");
       object *cell = cons(item, NULL);
       if (head == NULL) head = cell;
       else tail->cdr = cell;
@@ -8897,7 +9269,7 @@ object *read (gfun_t gfun) {
   object *item = nextitem(gfun);
   if (item == (object *)KET) error2("incomplete list");
   if (item == (object *)BRA) return readrest(gfun);
-  if (item == (object *)DOT) return read(gfun);
+  if (item == (object *)DOT) return read(gfun);   // Not clear why.
   if (item == (object *)QUO) return cons(bsymbol(QUOTE), cons(read(gfun), NULL));
   return item;
 }
@@ -8912,23 +9284,10 @@ void initenv () {
   tee = bsymbol(TEE);
 }
 
-/*
-  initgfx - initialises the graphics
-*/
-void initgfx () {
-  #if defined(gfxsupport)
-  tft.init();
-  tft.writecommand(TFT_DISPOFF);
-  tft.invertDisplay(1);
-  tft.fillScreen(TFT_BLACK);
-  tft.writecommand(TFT_DISPON);
-  #endif
-}
-
 void setup () {
-  Serial.begin(9600);
-  int start = millis();
-  while ((millis() - start) < 5000) { if (Serial) break; }
+  //Serial.begin(9600);
+  //int start = millis();
+  //while ((millis() - start) < 5000) { if (Serial) break; }
   #if defined(sdcardsupport)
   pinMode(SDCARD_SS_PIN, OUTPUT);
   digitalWrite(SDCARD_SS_PIN,1);
@@ -8936,9 +9295,11 @@ void setup () {
   initworkspace();
   initenv();
   initsleep();
-  initgfx();
   initkybd();
-  pfstring(PSTR("uLisp 4.7b "), pserial); pln(pserial);
+
+  S = init_screen();
+  T = init_terminal();
+  pfstring(PSTR("uLisp 4.7b "), pout); pln(pout);
 }
 
 // Read/Evaluate/Print loop
@@ -8951,40 +9312,36 @@ void repl (object *env) {
     randomSeed(micros());
     #if defined(printfreespace)
     if (!tstflag(NOECHO)) gc(NULL, env);
-    pint(Freespace+1, pserial);
+    pint(Freespace+1, pout);
     #endif
     if (BreakLevel) {
-      pfstring(" : ", pserial);
-      pint(BreakLevel, pserial);
+      pfstring(" : ", pout);
+      pint(BreakLevel, pout);
     }
-    pserial('>'); pserial(' ');
+    pout('>'); pout(' ');
     Context = NIL;
-    object *line = read(gserial);
-    #if defined(CPU_NRF52840)
-    Serial.flush();
-    #endif
+    input_line = read_line(T, S);
+    line_pos = 0;
+    object *line = read(ginput_line);
     // Break handling
     if (BreakLevel) {
       if (line == nil || line == bsymbol(COLONC)) {
-        pln(pserial); return;
+        pln(pout); return;
       } else if (line == bsymbol(COLONA)) {
-        pln(pserial); pln(pserial);
+        pln(pout); pln(pout);
         GCStack = NULL;
         longjmp(*handler, 1);
       } else if (line == bsymbol(COLONB)) {
-        pln(pserial); printbacktrace();
+        pln(pout); printbacktrace();
         line = bsymbol(NOTHING);
       }
     }
     if (line == (object *)KET) error2("unmatched right bracket");
     protect(line);
-    pfl(pserial);
     line = eval(line, env);
-    pfl(pserial);
-    printobject(line, pserial);
+    printobject(line, pout);
     unprotect();
-    pfl(pserial);
-    pln(pserial);
+    pfl(pout);
   }
 }
 
