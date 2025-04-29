@@ -9083,13 +9083,14 @@ int ginput_line() {
 }
 
 
-enum parser_state { INIT, HASH, COMMENT, LONGCOMMENT, DOTSYM, BUFFER, CHR, COMPLETE };
+enum parser_state { INIT, HASH, COMMENT, LONGCOMMENT, DOTSYM, BUFFER, CHR};
 uint8_t stream_error;
 
 object *nextitem (gfun_t gfun) {
   int ch;
   uint8_t state = INIT;
   stream_error = 0;
+  uint8_t complete = 0;
 
   int index = 0;
   char buffer[BUFFERSIZE];
@@ -9099,7 +9100,7 @@ object *nextitem (gfun_t gfun) {
   uint8_t base = 0;
 
   // Read text token
-  while (state != COMPLETE) {
+  while (!complete) {
     ch = gfun();
     if (ch < 0) {
       break;
@@ -9133,13 +9134,13 @@ object *nextitem (gfun_t gfun) {
     case CHR:
     case BUFFER:
       if (issp(ch)) {
-        state = COMPLETE;
+        complete = 1 ;
         break;
       }
 
       if (isbr(ch)) {
         LastChar = ch;
-        state = COMPLETE;
+        complete = 1;
         break;
       }
 
@@ -9224,7 +9225,6 @@ object *nextitem (gfun_t gfun) {
     if (index == 3) return character((buffer[0]*10+buffer[1])*10+buffer[2]-5328); // '0' = 48 4800+480+48 = 5328
     error2("unknown character");
     break;
-  case COMPLETE:
   case BUFFER:
     if (base > 0) must_int = 1;
     else base = 10;
