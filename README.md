@@ -1,4 +1,14 @@
-# PicoCalc uLisp Machine
-A version of uLisp to convert the Clockwork Pi PicoCalc into a self-contained handheld Lisp computer.
+# This is a branch with experimental REPL
 
-For more information see [PicoCalc uLisp Machine](http://www.ulisp.com/show?56ZO).
+Main features:
+
+* Single line editor with arrow keys navigation
+* Del/Backspace
+* History of inputs with up/down arrow keys
+* Hardware screen scrolling
+
+TODO:
+
+* Multiline editor
+* Brackets highlight
+* Brackets autoclose
