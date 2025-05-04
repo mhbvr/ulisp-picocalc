@@ -70,6 +70,7 @@ TFT_eSPI tft;
 #define VSCRDEF 0x33
 
 #define MAX_HISTORY 10
+#define MAX_BRACKETS 100
 
 // Keycodes
 
@@ -491,6 +492,7 @@ int move_left (struct screen *s, int allow_scroll /* Not implemented */) {
 // It returns change of Y coodinate in the case of scrolling. Y < 0 means scrolling up.
 int write(struct screen *s, char c, int move, int allow_scroll) {
   if (c == '\n') {
+    if (!move) return 0;
     s->x = 0;
     return move_next_line(s, allow_scroll);
   }
@@ -503,22 +505,6 @@ int write(struct screen *s, char c, int move, int allow_scroll) {
   if (!move) return 0;
 
   return move_right(s, allow_scroll);
-}
-
-// Cursor is an inverse symbol. 
-void draw_cursor(struct screen *s, char c, bool show) {
-  uint32_t text_color = s->text_color;
-  uint32_t bg_color = s->bg_color;
-
-  if (show) {
-    set_colors(s, s->bg_color, s->text_color);
-  }
-
-  write(s, c, false, false);
-
-  if (show) {
-    set_colors(s, text_color, bg_color);
-  }
 }
 
 // Global screen variable
@@ -1693,7 +1679,7 @@ bool eqsymbol (symbol_t sym1, symbol_t sym2) {
 /*
   eq - implements Lisp eq, taking into account PSRAM
 */
-bool eq (object *arg1, object *arg2) {
+bool  eq (object *arg1, object *arg2) {
   if (arg1 == arg2) return true;  // Same object
   if ((arg1 == nil) || (arg2 == nil)) return false;  // Not both values
   #if !defined(BOARD_HAS_PSRAM)
@@ -2176,17 +2162,23 @@ object *copystring (object *arg) {
 
 /*
   readstring - reads characters from an input stream up to delimiter delim
-  and returns a Lisp string
+  and returns a Lisp string or NULL. It eofok is true function does not fail
+  if the stream is ended before the delimeter.
 */
-object *readstring (uint8_t delim, bool esc, gfun_t gfun) {
+object *readstring (uint8_t delim, bool esc, bool eofok, gfun_t gfun) {
   object *obj = newstring();
-  object *tail = obj;
-  int ch = gfun();
-  if (ch == -1) error2("unexpected end of stream");
-  while ((ch != delim) && (ch != -1)) {
-    if (esc && ch == '\\') ch = gfun();
-    buildstring(ch, &tail);
+  object *tail = NULL;
+  int ch;
+
+
+  while (1) {
     ch = gfun();
+    if (ch < 0 && (tail == NULL || !eofok)) return NULL; // EOF at the start or EOF is not ok
+    if ((ch < 0 && eofok ) || ch == delim) break;
+
+    if (esc && ch == '\\') continue;
+    if (tail == NULL) tail = obj;
+    buildstring(ch, &tail);
   }
   return obj;
 }
@@ -5768,7 +5760,7 @@ object *fn_readbyte (object *args, object *env) {
 object *fn_readline (object *args, object *env) {
   (void) env;
   gfun_t gfun = gstreamfun(args);
-  return readstring('\n', false, gfun);
+  return readstring('\n', false, true, gfun);
 }
 
 /*
@@ -8182,12 +8174,8 @@ bool findsubstring (char *part, builtin_t name) {
 }
 
 void testescape () {
-  static uint16_t n;
-  if (n++) return;
-  if (Serial.available()) {
-    char c = Serial.read();
-    if (c == '~') error2("escape!");
-  }
+  static uint8_t n;
+  if (n++ % 1000 != 0) return;
   if (pc_kbd.keyCount() > 0) {
     const PCKeyboard::KeyEvent key = pc_kbd.keyEvent();
     if (key.state == PCKeyboard::StatePress) {
@@ -8829,6 +8817,10 @@ struct terminal {
   // start_y should be updated after scrolling.
   uint8_t start_x;
   uint8_t start_y;
+
+  // Position of brackets for the current block
+  int open_bracket;
+  int close_bracket;
 };
 
 struct terminal *init_terminal() {
@@ -8836,23 +8828,24 @@ struct terminal *init_terminal() {
   if (t == NULL) return t;
   memset(t, 0, sizeof(struct terminal));
   t->max_history = MAX_HISTORY;
+  t->open_bracket = -1;
+  t->close_bracket = -1;
 
   return t;
 }
 
-// Used to print data on screen.
-// Return space char when line is NULL or position out of bound.
-char get_c(struct terminal *t ) {
+// Return character under cursor or space symbol if line is NULL of out of the bound
+char get_c(struct terminal *t) {
   if (t->line == NULL || t->pos >= t->line->size || t->pos < 0) return ' ';
   return t->line->buffer[t->pos];
 }
 
-// Returns X position on the screen of the current text symbol.
+// Returns X position on the screen of the cursor.
 int get_x(struct terminal *t, struct screen *s) {
   return (t->start_x + t->pos) % s->columns;
 }
 
-// Returns Y position on the screen of the current text symbol.
+// Returns Y position on the screen of the cursor.
 int get_y(struct terminal *t, struct screen *s) {
   return t->start_y + (t->start_x + t->pos) / s->columns;
 }
@@ -8863,9 +8856,90 @@ int get_len(struct terminal *t) {
   return t->line->size;
 }
 
-void move_cursor(struct terminal *t, struct screen *s, char key) {
-  draw_cursor(s, get_c(t), 0);
+// Locate open can close bracket for the current cursor block
+void find_brackets (struct terminal* t) {
+  int num = 0;
   
+  // Looking backwards for the open bracket
+  t->open_bracket = -1;
+
+  for (int i = t->pos; i >= 0; i--) {
+    if (t->line->buffer[i] == '(') {
+      if (num == 0) {
+        t->open_bracket = i;
+        break;
+      };
+      num--;
+    }
+    if (t->line->buffer[i] == ')' && i != t->pos) num++; 
+  }
+
+  // Looking forward for the close bracket
+  t->close_bracket = -1;
+  num = 0;
+  for (int i = t->pos; i < get_len(t); i++) {
+    if (t->line->buffer[i] == ')') {
+      if (num == 0) {
+        t->close_bracket = i;
+        break;
+      };
+      num--;
+    }
+    if (t->line->buffer[i] == '(' && i != t->pos) num++; 
+  }
+  return;
+}
+
+// Cursor is an inverse symbol. 
+void draw_cursor (struct terminal *t, struct screen *s, int show) {
+  uint32_t text_color = s->text_color;
+  uint32_t bg_color = s->bg_color;
+
+  if (show) {
+    set_colors(s, s->bg_color, s->text_color);
+  }
+
+  write(s, get_c(t), false, false);
+
+  if (show) {
+    set_colors(s, text_color, bg_color);
+  }
+}
+
+void higlight_brackets(struct terminal *t, struct screen *s, int show) {
+  int curr_pos = t->pos;
+  uint32_t text_color = s->text_color;
+  uint32_t bg_color = s->bg_color;
+  uint32_t hl_color= TFT_ORANGE;
+
+  if (show) {
+    set_colors(s, hl_color, s->bg_color);
+    find_brackets(t);
+  }
+
+  t->pos = t->open_bracket;
+  if (t->open_bracket >= 0 && t->pos != curr_pos) { 
+    set_position(s, get_x(t,s), get_y(t,s));
+    write(s, get_c(t), 0, 0);
+  }
+
+  t->pos = t->close_bracket;
+  if (t->close_bracket >= 0 && t->pos != curr_pos) {
+    set_position(s, get_x(t,s), get_y(t,s));
+    write(s, get_c(t), 0, 0);
+  }
+
+  if (show) set_colors(s, text_color, bg_color);
+  t->pos = curr_pos;
+  set_position(s, get_x(t,s), get_y(t,s));
+}
+
+// Move cursor as key pressed
+void move_cursor(struct terminal *t, struct screen *s, char key) {
+  // Hide cursor and highlighted brackets
+  draw_cursor(t, s, 0);
+  higlight_brackets(t, s, 0);
+
   switch(key) {
   case ARROW_LEFT:
     if (t->pos == 0) break;  // line start
@@ -8887,7 +8961,9 @@ void move_cursor(struct terminal *t, struct screen *s, char key) {
     break;
   }
 
-  draw_cursor(s, get_c(t), 1);
+  // Show cursor and highlight brackets
+  higlight_brackets(t, s, 1);
+  draw_cursor(t, s, 1);
 }
 
 void print_line(struct terminal *t, struct screen *s, int size) {
@@ -8932,26 +9008,27 @@ struct line * read_line(struct terminal *t, struct screen *s) {
     t->num_lines++;
   }
 
-//  write(s, '>', 1, 1);
-//  write(s, ' ', 1, 1);
-  draw_cursor(s, ' ', 1);
-  
   t->pos = 0;
   t->start_x = s->x;
   t->start_y = s->y;
+  draw_cursor(t, s, 1);
+  int hg = 0;
 
   while (1) {
     if (pc_kbd.keyCount() > 0) {
       PCKeyboard::KeyEvent event = pc_kbd.keyEvent();
       if (event.state ==  PCKeyboard::StatePress) {
+        hg = 0;
         
         if (is_printable(event.key)) {
-          draw_cursor(s, get_c(t), 0);
+          higlight_brackets(t, s, 0);
+          draw_cursor(t, s, 0);
           add_char(t->line, event.key, t->pos);
           print_line(t, s, get_len(t) + 1);
           t->pos++;
           move_right(s, 1);
-          draw_cursor(s, get_c(t), 1);
+          draw_cursor(t, s, 1);
+          higlight_brackets(t, s, 1);
           continue;
         }
 
@@ -8960,13 +9037,15 @@ struct line * read_line(struct terminal *t, struct screen *s) {
           // TODO: Prev input from history
           if (t->line->prev == NULL) break;
           show_line(t, s, t->line->prev);
-          draw_cursor(s, get_c(t), 1);
+          draw_cursor(t, s, 1);
+          hg = 1;
           break;
         case ARROW_DOWN:
           // TODO: Next input from history
           if (t->line->next == NULL) break;
           show_line(t, s, t->line->next);
-          draw_cursor(s, get_c(t), 1);
+          draw_cursor(t, s, 1);
+          hg = 1;
           break;
         case ARROW_LEFT:
         case ARROW_RIGHT:
@@ -8977,24 +9056,28 @@ struct line * read_line(struct terminal *t, struct screen *s) {
         case DELETE:
           // Delete symbol in the cursor position
           if (t->pos == get_len(t)) continue;
+          higlight_brackets(t, s, 0);
+          hg = 1;
           del_char(t->line, t->pos);
           print_line(t, s, get_len(t) + 1);
-          draw_cursor(s, get_c(t), 1); 
+          draw_cursor(t, s, 1);
           break;
         case BACKSPACE:
           // Delete symbol before cursor
           if (t->pos == 0) continue;
-          if (t->pos == get_len(t)) draw_cursor(s, ' ', 0);
+          higlight_brackets(t, s, 0);
+          hg = 1;
+          if (t->pos == get_len(t)) draw_cursor(t, s, 0);
           t->pos--;
           move_left(s, 1);
           del_char(t->line, t->pos);
           print_line(t, s, get_len(t) + 1);
-          draw_cursor(s, get_c(t), 1); 
+          draw_cursor(t, s, 1); 
           break;
         case ENTER:
           // TODO: 0 at the end.
           // Clear cursor
-          draw_cursor(s, get_c(t), 0);
+          draw_cursor(t, s, 0);
 
           // Move to the end of line
           t->pos = get_len(t);
@@ -9018,6 +9101,7 @@ struct line * read_line(struct terminal *t, struct screen *s) {
           return t->line;
           break;
         }
+        if (hg) higlight_brackets(t, s, 1);
       }
     }
   }
@@ -9112,8 +9196,11 @@ object *nextitem (gfun_t gfun) {
       if (ch == ')') return (object *)KET;
       if (ch == '(') return (object *)BRA;
       if (ch == '\'') return (object *)QUO;
-      if (ch == '"') return readstring('"', true, gfun);
-
+      if (ch == '"') {
+        object *str = readstring('"', true, false, gfun);
+        if (str == NULL) error2("missed quote for a string");
+        return str;
+      }
       if (ch == ';') {
         state = COMMENT;
         break;
